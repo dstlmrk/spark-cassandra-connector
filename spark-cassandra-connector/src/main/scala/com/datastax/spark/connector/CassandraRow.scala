@@ -1,6 +1,6 @@
 package com.datastax.spark.connector
 
-import com.datastax.driver.core.Row
+import com.datastax.driver.core.{CodecRegistry, ResultSet, Row, TypeCodec}
 
 /** Represents a single row fetched from Cassandra.
   * Offers getters to read individual fields by column name or column index.
@@ -72,10 +72,63 @@ import com.datastax.driver.core.Row
   *   - java.sql.Date
   *   - org.joda.time.DateTime
   */
-final class CassandraRow(val columnNames: IndexedSeq[String], val columnValues: IndexedSeq[AnyRef])
+final class CassandraRow(val metaData:CassandraRowMetaData, val columnValues: IndexedSeq[AnyRef])
   extends ScalaGettableData with Serializable {
 
+  /**
+    * the consturctor is for testing and backward compatibility only.
+    * Use default constructor with shared metadata for memory saving and performance.
+    *
+    * @param columnNames
+    * @param columnValues
+    */
+  def this (columnNames: IndexedSeq[String], columnValues: IndexedSeq[AnyRef]) =
+    this(CassandraRowMetaData.fromColumnNames(columnNames), columnValues)
+
   override def toString = "CassandraRow" + dataAsString
+}
+
+case class CassandraRowMetaData(columnNames: IndexedSeq[String], resultSetColumnNames:Option[IndexedSeq[String]] = None, @transient codecs: Option[IndexedSeq[TypeCodec[AnyRef]]] = None) {
+  @transient
+  lazy val namesToIndex: Map[String,Int] = columnNames.zipWithIndex.toMap.withDefaultValue(-1);
+  @transient
+  lazy val indexOfCqlColumnOrThrow = unaliasColumnNames.zipWithIndex.toMap.withDefault { name =>
+    throw new ColumnNotFoundException(
+      s"Column not found: $name. " +
+        s"Available columns are: ${columnNames.mkString("[", ", ", "]")}")
+  }
+
+  @transient
+  lazy val indexOfOrThrow = namesToIndex.withDefault { name =>
+    throw new ColumnNotFoundException(
+      s"Column not found: $name. " +
+        s"Available columns are: ${columnNames.mkString("[", ", ", "]")}")
+  }
+  def unaliasColumnNames = resultSetColumnNames.getOrElse(columnNames)
+}
+
+object CassandraRowMetaData {
+
+  def fromResultSet(columnNames:IndexedSeq[String], rs: ResultSet) = {
+    import scala.collection.JavaConversions._
+    val columnDefs = rs.getColumnDefinitions.asList().toList
+    val rsColumnNames = columnDefs.map(_.getName)
+    val codecs = columnDefs.map( col => CodecRegistry.DEFAULT_INSTANCE.codecFor(col.getType))
+      .asInstanceOf[List[TypeCodec[AnyRef]]]
+    CassandraRowMetaData (columnNames, Some(rsColumnNames.toIndexedSeq), Some(codecs.toIndexedSeq))
+  }
+
+
+  /**
+    * create metadata object without codecs. Should be used for testing only
+    *
+    * @param columnNames
+    * @return
+    */
+  def fromColumnNames (columnNames: IndexedSeq[String]): CassandraRowMetaData =
+    CassandraRowMetaData(columnNames, None)
+
+  def fromColumnNames (columnNames: Seq[String]): CassandraRowMetaData = fromColumnNames(columnNames.toIndexedSeq)
 }
 
 object CassandraRow {
@@ -86,18 +139,23 @@ object CassandraRow {
     * the newly created `CassandraRow`, but it is not used to fetch data from
     * the input `Row` in order to improve performance. Fetching column values by name is much
     * slower than fetching by index. */
-  def fromJavaDriverRow(row: Row, columnNames: Array[String]): CassandraRow = {
-    val data = new Array[Object](columnNames.length)
-    for (i <- columnNames.indices)
-      data(i) = GettableData.get(row, i)
-    new CassandraRow(columnNames, data)
+  def fromJavaDriverRow(row: Row, metaData: CassandraRowMetaData): CassandraRow = {
+    val data = new Array[Object](metaData.columnNames.length)
+    for (i <- metaData.columnNames.indices) {
+      data(i) = metaData.codecs match {
+        case Some(codecs) => GettableData.get (row, i, metaData.codecs.get (i) )
+        case None => GettableData.get (row, i)
+      }
+    }
+    new CassandraRow(metaData, data)
   }
+
 
   /** Creates a CassandraRow object from a map with keys denoting column names and
     * values denoting column values. */
   def fromMap(map: Map[String, Any]): CassandraRow = {
     val (columnNames, values) = map.unzip
-    new CassandraRow(columnNames.toIndexedSeq, values.map(_.asInstanceOf[AnyRef]).toIndexedSeq)
+    new CassandraRow(CassandraRowMetaData.fromColumnNames(columnNames.toIndexedSeq), values.map(_.asInstanceOf[AnyRef]).toIndexedSeq)
   }
 
 }
