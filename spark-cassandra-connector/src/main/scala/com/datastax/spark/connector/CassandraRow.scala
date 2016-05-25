@@ -72,16 +72,17 @@ import com.datastax.driver.core.{CodecRegistry, ResultSet, Row, TypeCodec}
   *   - java.sql.Date
   *   - org.joda.time.DateTime
   */
-final class CassandraRow(val metaData:CassandraRowMetaData, val columnValues: IndexedSeq[AnyRef])
+final class CassandraRow(val metaData: CassandraRowMetaData, val columnValues: IndexedSeq[AnyRef])
   extends ScalaGettableData with Serializable {
 
   /**
-    * the consturctor is for testing and backward compatibility only.
+    * The constructor is for testing and backward compatibility only.
     * Use default constructor with shared metadata for memory saving and performance.
     *
     * @param columnNames
     * @param columnValues
     */
+  @deprecated
   def this (columnNames: IndexedSeq[String], columnValues: IndexedSeq[AnyRef]) =
     this(CassandraRowMetaData.fromColumnNames(columnNames), columnValues)
 
